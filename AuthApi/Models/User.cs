@@ -4,9 +4,14 @@
     {
         public int Id { get; set; }
         public required string Username { get; set; }
+        public required string Email { get; set; }
         public required string PasswordHash { get; set; }
         public string? RefreshToken { get; set; }
         public DateTime? RefreshTokenExpiryTime {  get; set; }
         public string Role { get; set; } = "user";
+        public bool EmailConfirmed { get; set; } = false;
+        public string? EmailVerificationToken { get; set; }
+        public string? PasswordResetToken { get; set; }
+        public DateTime? PasswordResetTokenExpiry { get; set; }
     }
 }

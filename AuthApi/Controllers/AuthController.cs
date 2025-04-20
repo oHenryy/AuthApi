@@ -4,6 +4,8 @@ using AuthApi.Services;
 using AuthApi.Helpers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
+using AuthApi.Data;
+using Microsoft.EntityFrameworkCore;
 
 namespace AuthApi.Controllers
 {
@@ -11,11 +13,13 @@ namespace AuthApi.Controllers
     [Route("[controller]")]
     public class AuthController : ControllerBase
     {
+        private readonly AppDbContext _context;
         private readonly AuthService _authService;
         private readonly JwtTokenGenerator _tokenGenerator;
 
-        public AuthController(AuthService authService, JwtTokenGenerator tokenGenerator)
+        public AuthController(AppDbContext context,AuthService authService, JwtTokenGenerator tokenGenerator)
         {
+            _context = context;
             _authService = authService;
             _tokenGenerator = tokenGenerator;
         }
@@ -23,7 +27,7 @@ namespace AuthApi.Controllers
         [HttpPost("register")]
         public async Task<IActionResult> Register([FromBody] RegisterModel model)
         {
-            var success = await _authService.RegisterAsync(model.Username, model.Password);
+            var success = await _authService.RegisterAsync(model.Username, model.Email, model.Password);
             if (!success) return BadRequest("Usuário já existe.");
             return Ok("Usuário registrado com sucesso.");
         }
@@ -79,6 +83,41 @@ namespace AuthApi.Controllers
         public IActionResult AdminOnly()
         {
             return Ok("Acesso liberado para admin.");
+        }
+
+        [HttpGet("confirm-email")]
+        public async Task<IActionResult> ConfirmEmail([FromQuery] string token)
+        {
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.EmailVerificationToken == token);
+            if (user == null) return BadRequest("Token inválido.");
+
+            user.EmailConfirmed = true;
+            user.EmailVerificationToken = null;
+            await _context.SaveChangesAsync();
+
+            return Ok("E-mail confirmado com sucesso.");
+        }
+
+        [HttpPost("forgot-password")]
+        public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordModel model)
+        {
+            var success = await _authService.RequestPasswordResetAsync(model.Email);
+            if (!success) return NotFound("E-mail não encontrado.");
+            return Ok("Link de redefinição enviado ao e-mail.");
+        }
+
+        [HttpPost("reset-password")]
+        public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordModel model)
+        {
+            var success = await _authService.ResetPasswordAsync(model.Token, model.NewPassword);
+            if (!success) return BadRequest("Token inválido ou expirado.");
+            return Ok("Senha redefinida com sucesso.");
+        }
+
+        [HttpGet("reset-password")]
+        public IActionResult ResetPasswordPage([FromQuery] string token)
+        {
+            return Ok($"Token recebido: {token}.");
         }
     }
 }

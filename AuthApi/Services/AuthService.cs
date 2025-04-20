@@ -7,6 +7,7 @@ using System.Security.Claims;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using AuthApi.Helpers;
+using System.ComponentModel.DataAnnotations;
 
 namespace AuthApi.Services
 {
@@ -15,26 +16,45 @@ namespace AuthApi.Services
         private readonly AppDbContext _context;
         private readonly IConfiguration _config;
         private readonly JwtTokenGenerator _tokenGenerator;
+        private readonly EmailSender _emailSender;
 
-        public AuthService(AppDbContext context, IConfiguration config, JwtTokenGenerator tokenGenerator)
+        public AuthService(AppDbContext context, IConfiguration config, JwtTokenGenerator tokenGenerator, EmailSender emailSender)
         {
             _context = context;
             _config = config;
             _tokenGenerator = tokenGenerator;
+            _emailSender = emailSender;
         }
 
-        public async Task<bool> RegisterAsync(string username, string password)
+        public async Task<bool> RegisterAsync(string username, string email, string password)
         {
-            if (await _context.Users.AnyAsync(u => u.Username == username))
+            if (await _context.Users.AnyAsync(u => u.Username == username || u.Email == email))
+                return false;
+
+            if (!new EmailAddressAttribute().IsValid(email))
                 return false;
 
             var passwordHash = HashPassword(password);
+            var verificationToken = Guid.NewGuid().ToString();
 
             var role = username == "admin" ? "admin" : "user";
-            var user = new User { Username = username, PasswordHash = passwordHash, Role = role };
+            var user = new User
+            {
+                Username = username,
+                Email = email,
+                PasswordHash = passwordHash,
+                Role = role,
+                EmailConfirmed = false,
+                EmailVerificationToken = verificationToken
+            };
+
             _context.Users.Add(user);
             await _context.SaveChangesAsync();
 
+            var link = $"https://localhost:7275/auth/confirm-email?token={verificationToken}";
+            var html = $"<h3>Confirme seu e-mail</h3><p><a href='{link}'>Clique aqui para confirmar</a></p>";
+
+            await _emailSender.SendEmailAsync(email, "Confirmação de E-mail", html);
             return true;
         }
 
@@ -107,6 +127,37 @@ namespace AuthApi.Services
             user.RefreshTokenExpiryTime = null;
 
             await _context.SaveChangesAsync();
+            return true;
+        }
+
+        public async Task<bool> RequestPasswordResetAsync(string email)
+        {
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+            if (user == null) return false;
+
+            user.PasswordResetToken = Guid.NewGuid().ToString();
+            user.PasswordResetTokenExpiry = DateTime.UtcNow.AddHours(1);
+            await _context.SaveChangesAsync();
+
+            var resetLink = $"https://localhost:7275/auth/reset-password?token={user.PasswordResetToken}";
+            var html = $"<h3>Redefinição de senha</h3><p><a href='{resetLink}'>Clique aqui para redefinir sua senha</a></p>";
+
+            await _emailSender.SendEmailAsync(email, "Redefinição de Senha", html);
+            return true;
+        }
+
+        public async Task<bool> ResetPasswordAsync(string token, string newPassword)
+        {
+            var user = await _context.Users.FirstOrDefaultAsync(u =>
+                u.PasswordResetToken == token && u.PasswordResetTokenExpiry > DateTime.UtcNow);
+
+            if (user == null) return false;
+
+            user.PasswordHash = HashPassword(newPassword);
+            user.PasswordResetToken = null;
+            user.PasswordResetTokenExpiry = null;
+            await _context.SaveChangesAsync();
+
             return true;
         }
 
