@@ -58,20 +58,6 @@ namespace AuthApi.Controllers
             return Ok(sessions);
         }
 
-        [HttpDelete("sessions/{id}")]
-        public async Task<IActionResult> DeleteSession(int id)
-        {
-            var userId = int.Parse(User.Claims.First(c => c.Type == "userId").Value);
-
-            var session = await _context.Sessions.FirstOrDefaultAsync(s => s.Id == id && s.UserId == userId);
-            if (session == null) return NotFound("Sessão não encontrada.");
-
-            _context.Sessions.Remove(session);
-            await _context.SaveChangesAsync();
-
-            return Ok("Sessão encerrada.");
-        }
-
         [HttpGet("logs")]
         public async Task<IActionResult> GetLogs()
         {
