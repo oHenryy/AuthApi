@@ -3,7 +3,6 @@ using AuthApi.Models;
 using AuthApi.Services;
 using AuthApi.Helpers;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Http.HttpResults;
 using AuthApi.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -17,7 +16,7 @@ namespace AuthApi.Controllers
         private readonly AuthService _authService;
         private readonly JwtTokenGenerator _tokenGenerator;
 
-        public AuthController(AppDbContext context,AuthService authService, JwtTokenGenerator tokenGenerator)
+        public AuthController(AppDbContext context, AuthService authService, JwtTokenGenerator tokenGenerator)
         {
             _context = context;
             _authService = authService;
@@ -35,17 +34,21 @@ namespace AuthApi.Controllers
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginModel model)
         {
-            var user = await _authService.AuthenticateAsync(model.Username, model.Password);
-            if (user == null) return Unauthorized("Credenciais inválidas.");
+            var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 
-            var token = _tokenGenerator.GenerateToken(user);
-            var refreshToken = _tokenGenerator.GenerateRefreshToken();
+            if (await _authService.IsIpBlockedAsync(ip))
+                return StatusCode(429, "Muitas tentativas falhas. Tente novamente mais tarde.");
 
-            user.RefreshToken = refreshToken;
-            user.RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(7);
-            await _authService.SaveChangesAsync();
+            var user = await _authService.AuthenticateAsync(model.Login, model.Password);
 
-            return Ok(new { token, refreshToken });
+            await _authService.RegisterLoginAttemptAsync(ip, user != null);
+
+            if (user == null)
+                return Unauthorized("Credenciais inválidas.");
+
+            await _authService.SendTwoFactorCodeAsync(user);
+            await _authService.LogActivityAsync(user.Id, ip, "Login iniciado (2FA enviado)");
+            return Ok("Código 2FA enviado. Confirme para receber o token.");
         }
 
         [HttpGet("profile")]
@@ -78,16 +81,10 @@ namespace AuthApi.Controllers
             return Ok("Logout realizado com sucesso.");
         }
 
-        [HttpGet("admin-area")]
-        [Authorize(Roles = "admin")]
-        public IActionResult AdminOnly()
-        {
-            return Ok("Acesso liberado para admin.");
-        }
-
         [HttpGet("confirm-email")]
         public async Task<IActionResult> ConfirmEmail([FromQuery] string token)
         {
+            var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
             var user = await _context.Users.FirstOrDefaultAsync(u => u.EmailVerificationToken == token);
             if (user == null) return BadRequest("Token inválido.");
 
@@ -95,6 +92,7 @@ namespace AuthApi.Controllers
             user.EmailVerificationToken = null;
             await _context.SaveChangesAsync();
 
+            await _authService.LogActivityAsync(user!.Id, ip, "Email confirmado");
             return Ok("E-mail confirmado com sucesso.");
         }
 
@@ -109,8 +107,14 @@ namespace AuthApi.Controllers
         [HttpPost("reset-password")]
         public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordModel model)
         {
-            var success = await _authService.ResetPasswordAsync(model.Token, model.NewPassword);
-            if (!success) return BadRequest("Token inválido ou expirado.");
+            var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+            var user = await _authService.ResetPasswordAsync(model.Token, model.NewPassword);
+            if (user == null)
+                return BadRequest("Token inválido ou expirado.");
+
+            await _authService.LogActivityAsync(user.Id, ip, "Senha redefinida");
+
             return Ok("Senha redefinida com sucesso.");
         }
 
@@ -118,6 +122,73 @@ namespace AuthApi.Controllers
         public IActionResult ResetPasswordPage([FromQuery] string token)
         {
             return Ok($"Token recebido: {token}.");
+        }
+
+        [HttpPost("2fa/confirm")]
+        public async Task<IActionResult> Confirm2FA([FromBody] TwoFactorModel model)
+        {
+            var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var device = Request.Headers["User-Agent"].ToString();
+
+            if (await _authService.IsIpBlockedAsync(ip))
+                return StatusCode(429, "Muitas tentativas 2FA falharam. Tente mais tarde.");
+
+            var tokenResult = await _authService.ConfirmTwoFactorAsync(
+                model.Username,
+                model.Code,
+                ip,
+                device
+            );
+
+            await _authService.RegisterLoginAttemptAsync(ip, tokenResult != null);
+
+            if (tokenResult == null)
+                return BadRequest("Código inválido ou expirado.");
+
+            var user = await _authService.GetUserByLoginAsync(model.Username);
+            if (user != null)
+            {
+                await _authService.RegisterSessionAsync(user, tokenResult.Value.token, ip, device);
+                await _authService.LogActivityAsync(user!.Id, ip, "Verificação 2FA efetuada");
+            }
+
+            return Ok(new { tokenResult.Value.token, tokenResult.Value.refreshToken });
+        }
+
+        [HttpGet("sessions")]
+        [Authorize]
+        public async Task<IActionResult> GetSessions()
+        {
+            var userId = int.Parse(User.Claims.First(c => c.Type == "userId").Value);
+
+            var sessions = await _context.Sessions
+                .Where(s => s.UserId == userId)
+                .Select(s => new
+                {
+                    s.Id,
+                    s.IpAddress,
+                    s.Device,
+                    s.CreatedAt,
+                    s.ExpiresAt
+                })
+                .ToListAsync();
+
+            return Ok(sessions);
+        }
+
+        [HttpDelete("sessions/{id}")]
+        [Authorize]
+        public async Task<IActionResult> DeleteSession(int id)
+        {
+            var userId = int.Parse(User.Claims.First(c => c.Type == "userId").Value);
+
+            var session = await _context.Sessions.FirstOrDefaultAsync(s => s.Id == id && s.UserId == userId);
+            if (session == null) return NotFound("Sessão não encontrada.");
+
+            _context.Sessions.Remove(session);
+            await _context.SaveChangesAsync();
+
+            return Ok("Sessão encerrada.");
         }
     }
 }
